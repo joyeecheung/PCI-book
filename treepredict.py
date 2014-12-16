@@ -1,8 +1,9 @@
-from collections import Counter
+from collections import Counter, defaultdict
 from math import log
 
 RESULT_IDX = -1
 SEP = '\t'
+MISSING = None
 
 
 def clean(token):
@@ -10,7 +11,7 @@ def clean(token):
     try:
         return int(token)
     except ValueError:
-        return token
+        return None if token == 'None' else token
 
 
 my_data = [map(clean, line.split(SEP))
@@ -22,12 +23,17 @@ def divide(data, tests):
 
 
 def divide_bool(data, attr, value):
+    counter = Counter(record[attr] for record in data)
+    guess = counter.most_common()[0][0]
+
+    fix_missing = lambda x: guess if x == MISSING else x
+
     if isinstance(value, int) or isinstance(value, float):
-        left = lambda x: x[attr] >= value
-        right = lambda x: x[attr] < value
+        left = lambda x: fix_missing(x[attr]) >= value
+        right = lambda x: fix_missing(x[attr]) < value
     else:
-        left = lambda x: x[attr] == value
-        right = lambda x: x[attr] != value
+        left = lambda x: fix_missing(x[attr]) == value
+        right = lambda x: fix_missing(x[attr]) != value
 
     return (filter(left, data), filter(right, data))
 
@@ -74,13 +80,14 @@ assert close(gini_impurity(set1), 0.53125)
 class Node(object):
 
     def __init__(self, attr=RESULT_IDX, value=None,
-                 left=None, right=None, result=None):
+                 left=None, right=None, leaves=None, count=None):
         """"""
         self.attr = attr
         self.value = value
-        self.result = result  # the classification or regression
+        self.leaves = leaves  # the classification or regression
         self.left = left
         self.right = right
+        self.count = count
 
 
 def build_tree(data, score=entropy):
@@ -94,7 +101,7 @@ def build_tree(data, score=entropy):
     attr_list = list(xrange(len(data[0])))
     del attr_list[RESULT_IDX]
     for attr in attr_list:
-        values = set(record[attr] for record in data)
+        values = set(record[attr] for record in data).remove(MISSING)
         # find the attribute value resulted in best gain
         for value in values:
             set1, set2 = divide_bool(data, attr, value)
@@ -109,20 +116,92 @@ def build_tree(data, score=entropy):
     if best_gain > 0:  # when there are more attribute to test
         left = build_tree(best_sets[0])
         right = build_tree(best_sets[1])
-        return Node(best_criteria[0], best_criteria[1], left, right)
+        return Node(best_criteria[0], best_criteria[1],
+                    left, right, count=len(data))
     else:  # all tested
-        return Node(result=count(data))
+        return Node(leaves=count(data), count=len(data))
 
 
 def print_tree(tree, indent=''):
     # Is this a leaf node?
-    if tree.result:
-        print str(tree.result)
+    if tree.leaves:
+        print str(tree.leaves)
     else:
         # Print the criteria
-        print str(tree.attr) + ':' + str(tree.value) + '? '
+        print str(tree.attr) + ':' + str(tree.value) + '? ', tree.count
         # Print the branches
         print indent + 'T->',
         print_tree(tree.left, indent + '   ')
         print indent + 'F->',
         print_tree(tree.right, indent + '   ')
+
+
+# def classify(tree, observation):
+#     if tree.leaves:
+#         return tree.leaves
+
+#     value = observation[tree.attr]
+#     if isinstance(value, int) or isinstance(value, float):
+#         branch = tree.left if value >= tree.value else tree.right
+#     else:
+#         branch = tree.left if value == tree.value else tree.right
+#     return classify(branch, observation)
+
+
+def classify(tree, observation):
+    if tree.leaves:
+        return tree.leaves
+
+    value = observation[tree.attr]
+
+    if value == MISSING:
+        probe_left = classify(tree.left, observation)
+        probe_right = classify(tree.right, observation)
+
+        left_weight = float(tree.left.count) / tree.count
+        right_weight = float(tree.right.count) / tree.count
+        result = defaultdict(int)
+        for k, v in probe_left.items():
+            result[k] += v * left_weight
+        for k, v in probe_right.items():
+            result[k] += v * right_weight
+
+        return dict(result)
+
+    if isinstance(value, int) or isinstance(value, float):
+        branch = tree.left if value >= tree.value else tree.right
+    else:
+        branch = tree.left if value == tree.value else tree.right
+    return classify(branch, observation)
+
+
+def mdclassify(observation, tree):
+    if tree.leaves != MISSING:
+        return tree.leaves
+    else:
+        v = observation[tree.attr]
+        if v == MISSING:
+            tr, fr = mdclassify(observation, tree.left), mdclassify(
+                observation, tree.right)
+            tcount = sum(tr.values())
+            fcount = sum(fr.values())
+            tw = float(tcount) / (tcount + fcount)
+            fw = float(fcount) / (tcount + fcount)
+            result = {}
+            for k, v in tr.items():
+                result[k] = v * tw
+            for k, v in fr.items():
+                result[k] = v * fw
+            return result
+        else:
+            if isinstance(v, int) or isinstance(v, float):
+                if v >= tree.value:
+                    branch = tree.left
+                else:
+                    branch = tree.right
+            else:
+                if v == tree.value:
+                    branch = tree.left
+                else:
+                    branch = tree.right
+            return mdclassify(observation, branch)
